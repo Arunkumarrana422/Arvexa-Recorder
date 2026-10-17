@@ -1,0 +1,6 @@
+{
+  "name": "Arvexa Recorder",
+  "description": "High-performance screen recorder for Android with internal game audio capture, up to 1080p 60FPS recording, and MP4 MediaStore saving.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

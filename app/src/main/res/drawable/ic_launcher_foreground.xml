@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="54"
+        android:pivotY="54">
+        <!-- Outer Glowing Accent Ring -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#2563EB"
+            android:strokeWidth="2.5"
+            android:strokeAlpha="0.4"
+            android:pathData="M 54 26 A 28 28 0 1 1 53.9 26" />
+
+        <!-- Inner Circular Track -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#38BDF8"
+            android:strokeWidth="3.5"
+            android:strokeLineCap="round"
+            android:pathData="M 54 31 A 23 23 0 1 1 37.7 70.2" />
+
+        <!-- High-contrast Record Indicator Center -->
+        <path
+            android:fillColor="#EF4444"
+            android:pathData="M 54 44 A 10 10 0 1 1 53.9 44" />
+
+        <!-- Audio Waveform Graphic at Bottom -->
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M 40 68 L 43 68 L 43 76 L 40 76 Z" />
+        <path
+            android:fillColor="#60A5FA"
+            android:pathData="M 46 64 L 49 64 L 49 80 L 46 80 Z" />
+        <path
+            android:fillColor="#93C5FD"
+            android:pathData="M 52 61 L 56 61 L 56 83 L 52 83 Z" />
+        <path
+            android:fillColor="#60A5FA"
+            android:pathData="M 59 64 L 62 64 L 62 80 L 59 80 Z" />
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M 65 68 L 68 68 L 68 76 L 65 76 Z" />
+    </group>
+</vector>
