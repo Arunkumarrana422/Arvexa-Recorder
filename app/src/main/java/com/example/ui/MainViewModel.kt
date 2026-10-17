@@ -182,6 +182,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _savedVideoDialog.value = null
     }
 
+    fun resetRecordingState() {
+        ScreenRecordService.resetState()
+    }
+
     fun clearFeedbackMessage() {
         _userFeedbackMessage.value = null
     }

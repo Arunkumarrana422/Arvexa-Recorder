@@ -52,7 +52,6 @@ class AudioCaptureManager(
                     val playbackConfig = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
                         .addMatchingUsage(AudioAttributes.USAGE_GAME)
                         .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                        .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
                         .build()
 
                     val format = AudioFormat.Builder()
@@ -197,19 +196,20 @@ class AudioCaptureManager(
                     outputBuffer = micBuffer
                 }
                 else -> {
-                    // Slight sleep if nothing was read to avoid tight looping
+                    // When device/game is silent or in loading screen, generate silent PCM chunk
+                    // to prevent audio track starvation and MPEG4Writer empty track errors
+                    validBytes = 2048 // 512 stereo 16-bit frames
+                    java.util.Arrays.fill(internalBuffer, 0, validBytes, 0.toByte())
+                    outputBuffer = internalBuffer
                     try {
-                        Thread.sleep(10)
+                        Thread.sleep(11) // 512 frames / 44100Hz = ~11.6ms pacing
                     } catch (_: InterruptedException) {
                         break
                     }
-                    continue
                 }
             }
 
             if (validBytes > 0 && !isPaused.get()) {
-                // Audio timestamp in microseconds: samples / sampleRate * 1,000,000
-                // 1 stereo 16-bit frame = 4 bytes
                 val framesInChunk = validBytes / 4
                 val presentationTimeUs = (totalFramesRead * 1_000_000L) / sampleRate
                 totalFramesRead += framesInChunk

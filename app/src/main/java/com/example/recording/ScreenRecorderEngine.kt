@@ -5,14 +5,12 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.projection.MediaProjection
 import android.net.Uri
 import android.os.Build
-import android.os.Handler
-import android.os.HandlerThread
-import android.os.ParcelFileDescriptor
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Surface
@@ -46,26 +44,27 @@ class ScreenRecorderEngine(
     private val isRunning = AtomicBoolean(false)
     private val isPaused = AtomicBoolean(false)
 
-    // Codec & Hardware components
+    // Hardware & Media components
     private var videoEncoder: MediaCodec? = null
     private var audioEncoder: MediaCodec? = null
     private var inputSurface: Surface? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var mediaMuxer: MediaMuxer? = null
-    private var outputPfd: ParcelFileDescriptor? = null
+    private var tempRecordingFile: File? = null
     private var outputUri: Uri? = null
     private var audioCaptureManager: AudioCaptureManager? = null
 
-    // Background workers
+    // Background threads
     private var videoDrainThread: Thread? = null
     private var audioDrainThread: Thread? = null
     private var timerThread: Thread? = null
 
-    // State tracking
+    // Muxer state
     private var videoTrackIndex = -1
     private var audioTrackIndex = -1
     private var isMuxerStarted = false
     private val muxerLock = Any()
+    private var hasAudioCapture = false
 
     private var recordWidth = 1080
     private var recordHeight = 1920
@@ -74,8 +73,6 @@ class ScreenRecorderEngine(
     private var startTimeMs = 0L
     private var totalPausedDurationMs = 0L
     private var pauseStartTimeMs = 0L
-
-    private var videoFrameCount = 0L
     private var filename = ""
 
     val isInternalAudioActive: Boolean
@@ -86,6 +83,7 @@ class ScreenRecorderEngine(
             calculateDimensions()
 
             filename = RecordingStorageManager.generateFilename()
+            // Allocate pending entry in MediaStore
             val pending = RecordingStorageManager.createPendingVideo(
                 context = context,
                 filename = filename,
@@ -94,16 +92,22 @@ class ScreenRecorderEngine(
             )
 
             if (pending == null) {
-                onError("Failed to create video file in Movies/Arvexa Recorder.")
+                onError("Failed to create video entry in Movies/Arvexa Recorder.")
                 return false
             }
 
             outputUri = pending.first
-            outputPfd = pending.second
+            try {
+                pending.second.close() // Close temporary pfd; we record to cache file and stream into uri
+            } catch (_: Exception) {}
 
-            // Initialize MediaMuxer using the ParcelFileDescriptor
+            // Setup local temp file for reliable seeking and MP4 header writing
+            val tempFile = File(context.cacheDir, "arvexa_${System.currentTimeMillis()}.mp4")
+            if (tempFile.exists()) tempFile.delete()
+            tempRecordingFile = tempFile
+
             mediaMuxer = MediaMuxer(
-                outputPfd!!.fileDescriptor,
+                tempFile.absolutePath,
                 MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
             )
 
@@ -122,43 +126,81 @@ class ScreenRecorderEngine(
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             }
 
-            videoEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
-                configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                inputSurface = createInputSurface()
-                start()
-            }
-
-            // Setup Audio Encoder if audio is not muted
-            val hasAudio = config.audioSource != AudioSourceOption.MUTE
-            if (hasAudio) {
-                val audioFormat = MediaFormat.createAudioFormat(
-                    MediaFormat.MIMETYPE_AUDIO_AAC,
-                    AUDIO_SAMPLE_RATE,
-                    AUDIO_CHANNELS
-                ).apply {
-                    setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                    setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BITRATE)
-                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
-                }
-
-                audioEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
-                    configure(audioFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            videoEncoder = try {
+                MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
+                    configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    inputSurface = createInputSurface()
                     start()
                 }
-
-                audioCaptureManager = AudioCaptureManager(
-                    audioSourceOption = config.audioSource,
-                    mediaProjection = mediaProjection,
-                    sampleRate = AUDIO_SAMPLE_RATE,
-                    onAudioDataAvailable = { pcmData, length, ptsUs ->
-                        feedAudioToEncoder(pcmData, length, ptsUs)
-                    },
-                    onWarning = onWarning
-                )
-                audioCaptureManager?.start()
+            } catch (codecEx: Exception) {
+                Log.e(TAG, "Failed to configure AVC encoder at ${recordWidth}x${recordHeight}: ${codecEx.message}")
+                // Fallback to safe 720x1280 (or 1280x720) if custom dimensions failed
+                val (fallbackW, fallbackH) = if (recordHeight >= recordWidth) Pair(720, 1280) else Pair(1280, 720)
+                recordWidth = fallbackW
+                recordHeight = fallbackH
+                videoFormat.setInteger(MediaFormat.KEY_WIDTH, fallbackW)
+                videoFormat.setInteger(MediaFormat.KEY_HEIGHT, fallbackH)
+                videoFormat.setInteger(MediaFormat.KEY_BIT_RATE, 6_000_000)
+                MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
+                    configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    inputSurface = createInputSurface()
+                    start()
+                }
             }
 
-            // Create Virtual Display mirroring to encoder's input surface
+            // Setup Audio Encoder if audio is requested
+            hasAudioCapture = false
+            if (config.audioSource != AudioSourceOption.MUTE) {
+                try {
+                    val audioFormat = MediaFormat.createAudioFormat(
+                        MediaFormat.MIMETYPE_AUDIO_AAC,
+                        AUDIO_SAMPLE_RATE,
+                        AUDIO_CHANNELS
+                    ).apply {
+                        setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                        setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BITRATE)
+                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+                    }
+
+                    val aEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
+                        configure(audioFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                        start()
+                    }
+
+                    val aCapture = AudioCaptureManager(
+                        audioSourceOption = config.audioSource,
+                        mediaProjection = mediaProjection,
+                        sampleRate = AUDIO_SAMPLE_RATE,
+                        onAudioDataAvailable = { pcmData, length, ptsUs ->
+                            feedAudioToEncoder(pcmData, length, ptsUs)
+                        },
+                        onWarning = onWarning
+                    )
+
+                    val audioStarted = aCapture.start()
+                    if (audioStarted) {
+                        audioEncoder = aEncoder
+                        audioCaptureManager = aCapture
+                        hasAudioCapture = true
+                    } else {
+                        Log.w(TAG, "Audio capture could not be initialized. Continuing video recording without sound.")
+                        onWarning("Audio capture not supported by device/game. Recording video only.")
+                        try {
+                            aEncoder.stop()
+                            aEncoder.release()
+                        } catch (_: Exception) {}
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Audio encoder setup exception: ${e.message}. Continuing with video only.")
+                    onWarning("Audio capture unavailable. Video recording will proceed.")
+                    try {
+                        audioEncoder?.release()
+                    } catch (_: Exception) {}
+                    audioEncoder = null
+                }
+            }
+
+            // Create Virtual Display mirroring screen onto encoder's input surface
             virtualDisplay = mediaProjection.createVirtualDisplay(
                 "ArvexaScreenCapture",
                 recordWidth,
@@ -174,14 +216,13 @@ class ScreenRecorderEngine(
             isPaused.set(false)
             startTimeMs = System.currentTimeMillis()
 
-            // Start drain threads
-            startDrainThreads(hasAudio)
+            startDrainThreads(hasAudioCapture)
             startTimerThread()
 
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start ScreenRecorderEngine: ${e.message}", e)
-            onError("Recorder initialization failed: ${e.message}")
+            onError("Recording initialization error: ${e.message}")
             cleanup()
             return false
         }
@@ -198,34 +239,42 @@ class ScreenRecorderEngine(
         val screenHeight = metrics.heightPixels
         val isPortrait = screenHeight >= screenWidth
 
-        val targetShortSide = when (config.resolution) {
-            ResolutionOption.RES_1080P -> 1080
-            ResolutionOption.RES_720P -> 720
-            ResolutionOption.RES_480P -> 480
+        val maxAllowedLongSide = when (config.resolution) {
+            ResolutionOption.RES_1080P -> 1920
+            ResolutionOption.RES_720P -> 1280
+            ResolutionOption.RES_480P -> 854
         }
 
-        // Scale proportionally keeping exact aspect ratio of the device display
-        val aspectRatio = if (isPortrait) {
-            screenHeight.toDouble() / screenWidth.toDouble()
+        // Calculate aspect ratio
+        val (screenLong, screenShort) = if (isPortrait) {
+            Pair(screenHeight, screenWidth)
         } else {
-            screenWidth.toDouble() / screenHeight.toDouble()
+            Pair(screenWidth, screenHeight)
         }
 
-        val targetLongSide = (targetShortSide * aspectRatio).toInt()
+        val aspectRatio = screenShort.toDouble() / screenLong.toDouble()
 
-        // H.264 encoders require dimensions to be multiples of 2 (or 16)
+        var chosenLong = minOf(maxAllowedLongSide, screenLong)
+        var chosenShort = (chosenLong * aspectRatio).toInt()
+
+        // H.264 encoders strictly require dimensions to be multiples of 16
+        chosenLong = (chosenLong / 16) * 16
+        chosenShort = (chosenShort / 16) * 16
+
+        // Clamp minimum safe dimensions
+        chosenLong = chosenLong.coerceAtLeast(320)
+        chosenShort = chosenShort.coerceAtLeast(240)
+
         if (isPortrait) {
-            recordWidth = roundToEven(minOf(targetShortSide, screenWidth))
-            recordHeight = roundToEven(targetLongSide)
+            recordWidth = chosenShort
+            recordHeight = chosenLong
         } else {
-            recordWidth = roundToEven(targetLongSide)
-            recordHeight = roundToEven(minOf(targetShortSide, screenHeight))
+            recordWidth = chosenLong
+            recordHeight = chosenShort
         }
 
-        Log.d(TAG, "Configured recording dimension: ${recordWidth}x${recordHeight} @ ${config.fps.fps}fps, bitrate: ${config.effectiveBitrate}")
+        Log.d(TAG, "Calculated safe dimensions: ${recordWidth}x${recordHeight} (screen was ${screenWidth}x${screenHeight})")
     }
-
-    private fun roundToEven(value: Int): Int = if (value % 2 != 0) value - 1 else value
 
     private fun feedAudioToEncoder(pcmData: ByteArray, length: Int, ptsUs: Long) {
         val encoder = audioEncoder ?: return
@@ -238,7 +287,6 @@ class ScreenRecorderEngine(
                 inputBuffer.clear()
                 inputBuffer.put(pcmData, 0, length)
 
-                // Adjust PTS with pause offset
                 val adjustedPts = ptsUs - (totalPausedDurationMs * 1000L)
                 encoder.queueInputBuffer(
                     inputBufferIndex,
@@ -268,6 +316,8 @@ class ScreenRecorderEngine(
     private fun drainVideoEncoder(hasAudio: Boolean) {
         val encoder = videoEncoder ?: return
         val bufferInfo = MediaCodec.BufferInfo()
+        var waitAudioIterations = 0
+        var prevVideoPtsUs = -1L
 
         while (isRunning.get()) {
             try {
@@ -290,18 +340,48 @@ class ScreenRecorderEngine(
                     }
                     outputBufferIndex >= 0 -> {
                         val encodedData = encoder.getOutputBuffer(outputBufferIndex)
-                        if (encodedData != null && bufferInfo.size > 0) {
-                            synchronized(muxerLock) {
-                                if (isMuxerStarted && !isPaused.get()) {
-                                    encodedData.position(bufferInfo.offset)
-                                    encodedData.limit(bufferInfo.offset + bufferInfo.size)
+                        if (encodedData != null) {
+                            // Filter out codec-specific configuration data buffer (SPS/PPS)
+                            // because MediaMuxer already received CSD via INFO_OUTPUT_FORMAT_CHANGED.
+                            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                                bufferInfo.size = 0
+                            }
 
-                                    // Offset timestamp if paused previously
-                                    bufferInfo.presentationTimeUs -= (totalPausedDurationMs * 1000L)
-                                    bufferInfo.presentationTimeUs = bufferInfo.presentationTimeUs.coerceAtLeast(0L)
+                            if (bufferInfo.size > 0) {
+                                synchronized(muxerLock) {
+                                    // If waiting for audio track times out (> 1 sec), start muxer with video only
+                                    if (!isMuxerStarted && hasAudio && videoTrackIndex != -1) {
+                                        waitAudioIterations++
+                                        if (waitAudioIterations > 50) {
+                                            Log.w(TAG, "Audio track timed out, starting muxer with video track only")
+                                            try {
+                                                mediaMuxer?.start()
+                                                isMuxerStarted = true
+                                            } catch (e: Exception) {
+                                                Log.e(TAG, "Failed to start muxer: ${e.message}")
+                                            }
+                                        }
+                                    }
 
-                                    mediaMuxer?.writeSampleData(videoTrackIndex, encodedData, bufferInfo)
-                                    videoFrameCount++
+                                    if (isMuxerStarted && !isPaused.get()) {
+                                        encodedData.position(bufferInfo.offset)
+                                        encodedData.limit(bufferInfo.offset + bufferInfo.size)
+
+                                        bufferInfo.presentationTimeUs -= (totalPausedDurationMs * 1000L)
+                                        bufferInfo.presentationTimeUs = bufferInfo.presentationTimeUs.coerceAtLeast(0L)
+
+                                        // Ensure strictly monotonically increasing PTS
+                                        if (bufferInfo.presentationTimeUs <= prevVideoPtsUs) {
+                                            bufferInfo.presentationTimeUs = prevVideoPtsUs + 1000L
+                                        }
+                                        prevVideoPtsUs = bufferInfo.presentationTimeUs
+
+                                        try {
+                                            mediaMuxer?.writeSampleData(videoTrackIndex, encodedData, bufferInfo)
+                                        } catch (e: Exception) {
+                                            Log.w(TAG, "Error writing video sample: ${e.message}")
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -323,6 +403,7 @@ class ScreenRecorderEngine(
     private fun drainAudioEncoder() {
         val encoder = audioEncoder ?: return
         val bufferInfo = MediaCodec.BufferInfo()
+        var prevAudioPtsUs = -1L
 
         while (isRunning.get()) {
             try {
@@ -345,16 +426,32 @@ class ScreenRecorderEngine(
                     }
                     outputBufferIndex >= 0 -> {
                         val encodedData = encoder.getOutputBuffer(outputBufferIndex)
-                        if (encodedData != null && bufferInfo.size > 0) {
-                            synchronized(muxerLock) {
-                                if (isMuxerStarted && !isPaused.get()) {
-                                    encodedData.position(bufferInfo.offset)
-                                    encodedData.limit(bufferInfo.offset + bufferInfo.size)
+                        if (encodedData != null) {
+                            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                                bufferInfo.size = 0
+                            }
 
-                                    bufferInfo.presentationTimeUs -= (totalPausedDurationMs * 1000L)
-                                    bufferInfo.presentationTimeUs = bufferInfo.presentationTimeUs.coerceAtLeast(0L)
+                            if (bufferInfo.size > 0) {
+                                synchronized(muxerLock) {
+                                    if (isMuxerStarted && !isPaused.get()) {
+                                        encodedData.position(bufferInfo.offset)
+                                        encodedData.limit(bufferInfo.offset + bufferInfo.size)
 
-                                    mediaMuxer?.writeSampleData(audioTrackIndex, encodedData, bufferInfo)
+                                        bufferInfo.presentationTimeUs -= (totalPausedDurationMs * 1000L)
+                                        bufferInfo.presentationTimeUs = bufferInfo.presentationTimeUs.coerceAtLeast(0L)
+
+                                        // Ensure strictly monotonically increasing PTS
+                                        if (bufferInfo.presentationTimeUs <= prevAudioPtsUs) {
+                                            bufferInfo.presentationTimeUs = prevAudioPtsUs + 1000L
+                                        }
+                                        prevAudioPtsUs = bufferInfo.presentationTimeUs
+
+                                        try {
+                                            mediaMuxer?.writeSampleData(audioTrackIndex, encodedData, bufferInfo)
+                                        } catch (e: Exception) {
+                                            Log.w(TAG, "Error writing audio sample: ${e.message}")
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -416,14 +513,12 @@ class ScreenRecorderEngine(
         val totalDurationMs = (System.currentTimeMillis() - startTimeMs - totalPausedDurationMs).coerceAtLeast(0L)
 
         try {
-            // Signal EOS to video encoder
             videoEncoder?.signalEndOfInputStream()
         } catch (e: Exception) {
             Log.w(TAG, "Error signalling video EOS: ${e.message}")
         }
 
         try {
-            // Signal EOS to audio encoder
             audioEncoder?.let { enc ->
                 val inputIndex = enc.dequeueInputBuffer(TIMEOUT_USEC)
                 if (inputIndex >= 0) {
@@ -434,10 +529,8 @@ class ScreenRecorderEngine(
             Log.w(TAG, "Error signalling audio EOS: ${e.message}")
         }
 
-        // Stop audio capture
         audioCaptureManager?.stop()
 
-        // Wait for drain threads to finish flushing
         try {
             videoDrainThread?.join(1000)
             audioDrainThread?.join(1000)
@@ -448,19 +541,30 @@ class ScreenRecorderEngine(
         try {
             synchronized(muxerLock) {
                 if (isMuxerStarted) {
-                    mediaMuxer?.stop()
-                    mediaMuxer?.release()
+                    try {
+                        mediaMuxer?.stop()
+                    } catch (muxerEx: Exception) {
+                        Log.w(TAG, "MediaMuxer stop warning (harmless): ${muxerEx.message}")
+                    }
+                    try {
+                        mediaMuxer?.release()
+                    } catch (_: Exception) {}
                 }
             }
             mediaMuxer = null
 
-            outputPfd?.let { pfd ->
-                finalSize = pfd.statSize
-                pfd.close()
-            }
-            outputPfd = null
+            // Copy temp file into MediaStore URI
+            val tempFile = tempRecordingFile
+            val uri = outputUri
+            if (tempFile != null && tempFile.exists() && uri != null) {
+                finalSize = tempFile.length()
+                context.contentResolver.openOutputStream(uri)?.use { outStream ->
+                    tempFile.inputStream().use { inStream ->
+                        inStream.copyTo(outStream)
+                    }
+                }
+                tempFile.delete()
 
-            outputUri?.let { uri ->
                 RecordingStorageManager.finalizeVideo(
                     context = context,
                     uri = uri,

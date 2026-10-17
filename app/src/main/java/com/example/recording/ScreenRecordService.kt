@@ -1,5 +1,6 @@
 package com.example.recording
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,14 +8,18 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.data.ArvexaDatabase
@@ -62,6 +67,10 @@ class ScreenRecordService : Service() {
             val s = _recordingState.value
             return s is RecordingStatus.Recording || s is RecordingStatus.Countdown || s is RecordingStatus.Finalizing
         }
+
+        fun resetState() {
+            _recordingState.value = RecordingStatus.Idle
+        }
     }
 
     private val binder = LocalBinder()
@@ -74,6 +83,13 @@ class ScreenRecordService : Service() {
     private var activeConfig: RecordingConfig = RecordingConfig()
     private var currentDurationMs: Long = 0L
     private var isCurrentlyPaused = false
+
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            Log.d(TAG, "MediaProjection stopped by system")
+            handleStop()
+        }
+    }
 
     inner class LocalBinder : Binder() {
         fun getService(): ScreenRecordService = this@ScreenRecordService
@@ -136,7 +152,11 @@ class ScreenRecordService : Service() {
         val initialNotification = buildNotification("Initializing recording…", isPaused = false)
         val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            if (activeConfig.audioSource.requiresMicrophonePermission() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val hasMicPermission = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (hasMicPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             }
             type
@@ -150,6 +170,29 @@ class ScreenRecordService : Service() {
             startForeground(NOTIFICATION_ID, initialNotification)
         }
 
+        // CRITICAL FOR ANDROID 14+ (API 34+):
+        // 1. Obtain MediaProjection immediately after startForeground on the main thread
+        // 2. Register MediaProjection.Callback BEFORE any VirtualDisplay or capture actions
+        try {
+            val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            val mp = mpManager.getMediaProjection(resultCode, resultData)
+            if (mp == null) {
+                _recordingState.value = RecordingStatus.Error("Failed to obtain screen capture permission.")
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return
+            }
+
+            mediaProjection = mp
+            mp.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception obtaining MediaProjection: ${e.message}", e)
+            _recordingState.value = RecordingStatus.Error("Screen capture permission error: ${e.message}")
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+
         serviceScope.launch {
             // Check countdown
             if (activeConfig.countdown.seconds > 0) {
@@ -160,18 +203,17 @@ class ScreenRecordService : Service() {
             }
 
             try {
-                val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
-
-                if (mediaProjection == null) {
-                    _recordingState.value = RecordingStatus.Error("Failed to obtain MediaProjection handle.")
+                val mp = mediaProjection
+                if (mp == null) {
+                    _recordingState.value = RecordingStatus.Error("Media projection was disconnected.")
+                    stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                     return@launch
                 }
 
                 recorderEngine = ScreenRecorderEngine(
                     context = applicationContext,
-                    mediaProjection = mediaProjection!!,
+                    mediaProjection = mp,
                     config = activeConfig,
                     onProgress = { durationMs ->
                         currentDurationMs = durationMs
@@ -209,7 +251,9 @@ class ScreenRecordService : Service() {
 
                 val success = recorderEngine!!.start()
                 if (!success) {
-                    _recordingState.value = RecordingStatus.Error("Failed to initialize video encoder.")
+                    if (_recordingState.value !is RecordingStatus.Error) {
+                        _recordingState.value = RecordingStatus.Error("Failed to start screen capture.")
+                    }
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 } else {
@@ -255,6 +299,9 @@ class ScreenRecordService : Service() {
         serviceScope.launch(Dispatchers.IO) {
             try {
                 recorderEngine?.stop()
+                try {
+                    mediaProjection?.unregisterCallback(projectionCallback)
+                } catch (_: Exception) {}
                 mediaProjection?.stop()
                 mediaProjection = null
             } catch (e: Exception) {
@@ -355,6 +402,10 @@ class ScreenRecordService : Service() {
         super.onDestroy()
         Log.d(TAG, "ScreenRecordService destroyed")
         recorderEngine?.stop()
+        try {
+            mediaProjection?.unregisterCallback(projectionCallback)
+        } catch (_: Exception) {}
         mediaProjection?.stop()
+        mediaProjection = null
     }
 }

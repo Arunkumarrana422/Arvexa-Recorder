@@ -154,7 +154,8 @@ fun HomeScreen(
                 onStartClick = onRequestRecordPermission,
                 onPauseClick = { viewModel.pauseRecording() },
                 onResumeClick = { viewModel.resumeRecording() },
-                onStopClick = { viewModel.stopRecording() }
+                onStopClick = { viewModel.stopRecording() },
+                onResetClick = { viewModel.resetRecordingState() }
             )
             Spacer(modifier = Modifier.height(24.dp))
         }
@@ -299,7 +300,8 @@ fun HeroRecordController(
     onStartClick: () -> Unit,
     onPauseClick: () -> Unit,
     onResumeClick: () -> Unit,
-    onStopClick: () -> Unit
+    onStopClick: () -> Unit,
+    onResetClick: () -> Unit
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val pulseScale by infiniteTransition.animateFloat(
@@ -574,7 +576,10 @@ fun HeroRecordController(
                         textAlign = TextAlign.Center
                     )
                     Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedButton(onClick = onStartClick) {
+                    OutlinedButton(onClick = {
+                        onResetClick()
+                        onStartClick()
+                    }) {
                         Text("Try Again")
                     }
                 }

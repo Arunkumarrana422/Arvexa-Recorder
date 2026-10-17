@@ -115,10 +115,9 @@ fun MainAppContent(viewModel: MainViewModel, activity: ComponentActivity) {
     val notifPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { _ ->
-        // Proceed with start
         checkMicAndStartScreenCapture(
             activity = activity,
-            requiresMic = config.audioSource.requiresMicrophonePermission(),
+            audioSource = config.audioSource,
             onHasPermissions = {
                 val mpManager = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 mediaProjectionLauncher.launch(mpManager.createScreenCaptureIntent())
@@ -135,7 +134,7 @@ fun MainAppContent(viewModel: MainViewModel, activity: ComponentActivity) {
         } else {
             checkMicAndStartScreenCapture(
                 activity = activity,
-                requiresMic = config.audioSource.requiresMicrophonePermission(),
+                audioSource = config.audioSource,
                 onHasPermissions = {
                     val mpManager = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                     mediaProjectionLauncher.launch(mpManager.createScreenCaptureIntent())
@@ -240,32 +239,23 @@ fun MainAppContent(viewModel: MainViewModel, activity: ComponentActivity) {
 
 private fun checkMicAndStartScreenCapture(
     activity: ComponentActivity,
-    requiresMic: Boolean,
+    audioSource: com.example.model.AudioSourceOption,
     onHasPermissions: () -> Unit,
     onRequestMic: () -> Unit
 ) {
-    if (requiresMic) {
-        val hasMic = ContextCompat.checkSelfPermission(
-            activity,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-        if (hasMic) {
-            onHasPermissions()
-        } else {
-            onRequestMic()
-        }
-    } else {
-        // Internal audio alone or mute
-        val hasAudioPerm = ContextCompat.checkSelfPermission(
-            activity,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
+    if (audioSource == com.example.model.AudioSourceOption.MUTE) {
+        onHasPermissions()
+        return
+    }
 
-        // AudioPlaybackCaptureConfiguration requires RECORD_AUDIO permission at runtime in Android 10+
-        if (hasAudioPerm) {
-            onHasPermissions()
-        } else {
-            onRequestMic()
-        }
+    val hasAudioPerm = ContextCompat.checkSelfPermission(
+        activity,
+        Manifest.permission.RECORD_AUDIO
+    ) == PackageManager.PERMISSION_GRANTED
+
+    if (hasAudioPerm) {
+        onHasPermissions()
+    } else {
+        onRequestMic()
     }
 }

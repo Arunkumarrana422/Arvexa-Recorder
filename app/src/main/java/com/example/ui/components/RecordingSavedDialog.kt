@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -28,6 +29,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -35,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -50,6 +53,7 @@ import coil.request.videoFrameMillis
 import com.example.model.RecordingItem
 import com.example.model.RecordingStatus
 import com.example.ui.theme.ArvexaBlue
+import com.example.ui.theme.ArvexaCyan
 import com.example.ui.theme.DarkNavyCard
 import com.example.ui.theme.DarkNavyCardBorder
 import com.example.ui.theme.DarkNavySurface
@@ -209,46 +213,45 @@ fun RecordingSavedDialog(
                     Text("Play Recording", fontWeight = FontWeight.SemiBold)
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // Action Row: Share, Rename, Delete
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    OutlinedButton(
+                    ActionTile(
+                        icon = Icons.Default.Share,
+                        label = "Share",
+                        tint = ArvexaCyan,
                         onClick = { onShare(item) },
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Share", fontSize = 12.sp)
-                    }
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("dialog_share_button")
+                    )
 
-                    OutlinedButton(
+                    ActionTile(
+                        icon = Icons.Default.DriveFileRenameOutline,
+                        label = "Rename",
+                        tint = Color.White,
                         onClick = { onRename(item) },
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(imageVector = Icons.Default.DriveFileRenameOutline, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Rename", fontSize = 12.sp)
-                    }
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("dialog_rename_button")
+                    )
 
-                    OutlinedButton(
+                    ActionTile(
+                        icon = Icons.Default.Delete,
+                        label = "Delete",
+                        tint = RecordRed,
                         onClick = { onDelete(item) },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = RecordRed),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(imageVector = Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Delete", fontSize = 12.sp)
-                    }
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("dialog_delete_button")
+                    )
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 TextButton(
                     onClick = onDismiss,
@@ -257,6 +260,48 @@ fun RecordingSavedDialog(
                     Text("Done", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ActionTile(
+    icon: ImageVector,
+    label: String,
+    tint: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = DarkNavyCard,
+        border = androidx.compose.foundation.BorderStroke(1.dp, DarkNavyCardBorder),
+        modifier = modifier.height(58.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 4.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = tint,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = label,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = tint,
+                maxLines = 1,
+                softWrap = false,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }
